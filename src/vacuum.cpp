@@ -36,7 +36,7 @@ Servo servoParachute;
 Servo servoBreak;
 time_t RTCTime;
 
-bool shouldTransmit;
+bool shouldTransmit = true;
 char FileC[100];
 float groundAlt;
 float apogee = INT_MIN;
@@ -50,7 +50,7 @@ class PacketConstructor {
     }
 
    public:
-    static unsigned long packetCount;
+    unsigned long packetCount;
     char time[9] = "xx:xx:xx";
     bool isSimulation = false;
     bool payloadReleased = false;
@@ -65,9 +65,9 @@ class PacketConstructor {
     float gpsSat;
 
     unsigned short state;
-    String lastCmd;
+    String lastCmd = "N/A";
 
-    String combine() const {
+    String combine() {
         return String(TEAM_ID) + "," + time + "," + packetCount + ",C," + (isSimulation ? 'S' : 'F') + "," + (payloadReleased ? 'R' : 'N') + "," + String(altitude, 2) + "," + String(temp, 2) + "," + String(voltage) + "," + String(gpsTime) + "," + String(gpsLat, 6) + "," + String(gpsLng, 6) + "," + String(gpsAlt) + "," + String(gpsSat) + "," + getStateString() + "," + lastCmd + "\r";
     }
 }(packet);
@@ -113,112 +113,6 @@ class BreakSystem {
 class CommandHandler {
 };
 
-void recovery() {
-}
-
-void setup() {
-    Serial.begin(9600);
-    Serial.println("Initiating...");
-    gpsSerial.begin(9600);
-    xbeeGS.begin(115200);
-    xbeeTP.begin(115200);
-
-    pinMode(LED1_PIN, OUTPUT);
-    pinMode(LED2_PIN, OUTPUT);
-    pinMode(BUZZER_PIN, OUTPUT);
-    pinMode(CAMERA_PIN, OUTPUT);
-    servoParachute.attach(SERVO_PARA_PIN);
-    servoBreak.attach(SERVO_BREAK_PIN);
-    pinMode(VOLTAGE_PIN, INPUT);
-
-    digitalWrite(CAMERA_PIN, HIGH);
-
-    digitalWrite(BUZZER_PIN, HIGH);
-    delay(1000);
-    digitalWrite(BUZZER_PIN, LOW);
-    delay(500);
-
-    setSyncProvider(getTeensy3Time);
-
-    // Initiate I2C devices
-    if (bme.init())
-        Serial.println("✔ SUCCEED: BME280");
-    else {
-        Serial.println("[FAILED] Unable to set up BME280!");
-        beep(1);
-        delay(500);
-    }
-    if (SD.begin(10))
-        Serial.println("✔ SUCCEED: SD card reader");
-    else {
-        Serial.println("[FAILED] SD card reader initialization failed!");
-        beep(5);
-    }
-
-    setParachute(false);
-
-    delay(1000);
-    recovery();
-}
-
-void stateLogic() {
-    getBMEData();
-    switch (packet.state) {
-        // PRELAUNCH
-        case 0:
-            // Entry of LAUNCH state
-            if (packet.altitude > 10) packet.state = 1;
-            break;
-
-        // LAUNCH
-        case 1:
-            // Entry of APOGEE state
-            if (apogee - packet.altitude >= 10 || packet.altitude >= 670) packet.state = 2;
-            break;
-
-        // APOGEE
-        case 2:
-            // Entry of PARADEPLOY state
-            if (packet.altitude <= 410) {
-                packet.state = 3;
-                setParachute(true);
-            }
-            break;
-
-        // PARADEPLOY
-        case 3:
-            // Entry of TPDEPLOY state
-            if (packet.altitude <= 310) {
-                packet.state = 4;
-                packet.payloadReleased = true;
-                breakSystem.start();
-            }
-            break;
-
-        // TPDEPLOY
-        case 4:
-            // Entry of LAND state
-            if (packet.altitude <= 5) {
-                packet.state = 5;
-            }
-            break;
-
-        // LAND
-        case 5:
-            // digitalWrite(BUZZER_PIN)
-            break;
-    }
-}
-
-void loop() {
-    stateLogic();
-    breakSystem.run();
-    if (shouldTransmit) {
-        Serial.print(packet.combine());
-        xbeeGS.print(packet.combine());
-    }
-}
-
 void beep(const unsigned int& count, const unsigned int& delay_ms = 100) {
     for (unsigned int i = 0; i < count; i++) {
         digitalWrite(BUZZER_PIN, HIGH);
@@ -253,9 +147,145 @@ void getGPSData() {
 
 void getBMEData() {
     packet.temp = bme.getTemperature();
-    packet.altitude = bme.calcAltitude(packet.isSimulation ? simPressure : bme.getPressure()) - groundAlt;
+    packet.altitude = bme.calcAltitude(bme.getPressure()) - groundAlt;
     // if (packet.altitude < -500 || packet.altitude > 800) return;
     if (packet.altitude >= apogee) {
         apogee = packet.altitude;
+    }
+}
+
+void recovery() {
+    getBMEData();
+    groundAlt = packet.altitude;
+    beep(3);
+}
+
+void setup() {
+    Serial.begin(9600);
+    Serial.println("Initiating...");
+    gpsSerial.begin(9600);
+    xbeeGS.begin(115200);
+    xbeeTP.begin(115200);
+
+    pinMode(LED1_PIN, OUTPUT);
+    pinMode(LED2_PIN, OUTPUT);
+    pinMode(BUZZER_PIN, OUTPUT);
+    pinMode(CAMERA_PIN, OUTPUT);
+    servoParachute.attach(SERVO_PARA_PIN);
+    servoBreak.attach(SERVO_BREAK_PIN);
+    pinMode(VOLTAGE_PIN, INPUT);
+
+    digitalWrite(CAMERA_PIN, HIGH);
+
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(1000);
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(500);
+
+    setSyncProvider(getTeensy3Time);
+
+    // Initiate I2C devices
+    if (bme.init())
+        Serial.println("✔ SUCCEED: BME280");
+    else {
+        Serial.println("[FAILED] Unable to set up BME280!");
+        // beep(1);
+        delay(500);
+    }
+    if (SD.begin(10))
+        Serial.println("✔ SUCCEED: SD card reader");
+    else {
+        Serial.println("[FAILED] SD card reader initialization failed!");
+        // beep(5);
+    }
+
+    setParachute(false);
+
+    delay(1000);
+    recovery();
+}
+
+void stateLogic() {
+    getBMEData();
+    switch (packet.state) {
+        // PRELAUNCH
+        case 0:
+            // Entry of LAUNCH state
+            if (packet.altitude > 10) packet.state = 1;
+            break;
+
+        // LAUNCH
+        case 1:
+            // Entry of APOGEE state
+            if (apogee - packet.altitude >= 10 && packet.altitude >= 670) packet.state = 2;
+            break;
+
+        // APOGEE
+        case 2:
+            // Entry of PARADEPLOY state
+            if (packet.altitude <= 410) {
+                packet.state = 3;
+                setParachute(true);
+            }
+            break;
+
+        // PARADEPLOY
+        case 3:
+            // Entry of TPDEPLOY state
+            if (packet.altitude <= 310) {
+                packet.state = 4;
+                packet.payloadReleased = true;
+                breakSystem.start();
+            }
+            break;
+
+        // TPDEPLOY
+        case 4:
+            // Entry of LAND state
+            if (packet.altitude <= 5) {
+                packet.state = 5;
+                shouldTransmit = false;
+                for (int i = 0; i < 5; i++) {
+                    xbeeTP.print("OFF");
+                    delay(100);
+                }
+            }
+            break;
+
+        // LAND
+        case 5:
+            digitalWrite(BUZZER_PIN, HIGH);
+            delay(500);
+            digitalWrite(BUZZER_PIN, LOW);
+            delay(500);
+            break;
+    }
+}
+
+unsigned long lastTransmit = 0;
+unsigned long lastStateLogic = 0;
+void loop() {
+    breakSystem.run();
+    if (millis() - lastStateLogic > 500) {
+        lastStateLogic = millis();
+        stateLogic();
+    }
+    if (shouldTransmit && millis() - lastTransmit > 1000) {
+        lastTransmit = millis();
+        Serial.print(packet.combine());
+        xbeeGS.print(packet.combine());
+        packet.packetCount++;
+    }
+    if (xbeeGS.available()) {
+        String cmd = xbeeGS.readStringUntil('\r');
+        if (cmd == "CMD,1022,CX,ON") {
+            beep(1);
+            packet.state = 0;
+            shouldTransmit = true;
+            getBMEData();
+            xbeeGS.println(packet.altitude);
+            groundAlt = bme.calcAltitude(bme.getPressure());
+            xbeeGS.println(groundAlt);
+        }
     }
 }
