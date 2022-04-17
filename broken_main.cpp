@@ -469,39 +469,7 @@ void emergency(String cmd) {
 }
 
 void loop() {
-    // if (xbeeTP.available()) {
-    //     Serial.print(xbeeTP.readString(5));
-    // }
     if (xbeeTP.available()) {
-        // while (xbeeTP.available()) {
-        //     char inchar = xbeeTP.read();
-        //     tp += inchar;
-        //     Serial.print(inchar);
-        //     if (inchar == '\r') {
-        //         xbeeGS.print(tp);
-        //         Serial.println(tp);
-        //         tp = "";
-        //     }
-        // }
-
-        // while (xbeeTP.available()) {
-        //     char inchar = xbeeTP.read();
-        //     if (reachTerminator && inchar != '$') {
-        //         xbeeGS.print(tp);
-        //         Serial.println(tp);
-        //         Serial.println("DONE");
-        //         tp = "";
-        //         tp += inchar;
-        //         reachTerminator = false;
-        //         continue;
-        //     }
-        //     if (inchar == '$') {
-        //         inchar = '\r';
-        //         reachTerminator = true;
-        //     }
-        //     tp += inchar;
-        // }
-
         String in = xbeeTP.readStringUntil('$');
         xbeeGS.print(in + '\r');
         Serial.println(in);
@@ -582,30 +550,6 @@ void loop() {
     }
 
     servoBreak.write(breakDegree);
-    // if (xbeeTP.available()) {
-    // String tp = xbeeTP.readStringUntil('\r');
-    // if (tp == "\r") return;
-    // tp = tp.trim();
-    // Serial.println("gonna read");
-
-    // char tpByte[10];
-    // const unsigned short n_read = xbeeTP.readBytes(tpByte, 10);
-    // // Serial.println("read");
-    // for (unsigned short i = 0; i < n_read; i++) {
-    //     Serial.print(tpByte[i]);
-    //     xbeeGS.print(tpByte[i]);
-    // }
-    // // Serial.println("TP: " + tp);
-    // // StatePayload++;
-    // File file = SD.open(FileC, FILE_WRITE);
-    // if (file) {
-    //     file.println(tp);
-    //     file.close();
-    // }
-    // tp = "";
-    // }
-
-    // delay(10);
     get_battery();
     if (cxON) {
         inMission();
