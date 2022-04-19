@@ -298,6 +298,8 @@ void setup() {
     recovery();
 }
 
+uint32_t startPayloadDeployAt;
+bool isCamOff = true;
 void stateLogic() {
     getBMEData();
     switch (packet.state) {
@@ -329,6 +331,9 @@ void stateLogic() {
                 packet.state = 4;
                 shouldPollPayload = true;
                 lastPoll = lastTransmit + 125;
+                startPayloadDeployAt = millis();
+                isCamOff = false;
+                toggleCamera();
                 breakSystem.start();
                 packet.payloadReleased = true;
                 for (int i = 0; i < 5; i++) {
@@ -341,6 +346,8 @@ void stateLogic() {
 
         // TPDEPLOY
         case 4:
+            if (!isCamOff && millis() - startPayloadDeployAt > 20000)
+                toggleCamera();
             // Entry of LAND state
             if (packet.altitude <= 5) {
                 packet.state = 5;
@@ -383,6 +390,7 @@ void doCommand(String cmd) {
         EEPROM.update(pkgAddr, packet.packetCount);
         EEPROM.update(stateAddr, packet.state);
         breakSystem.forceBreak();
+        isCamOff = true;
     } else if (cmd == "CX,OFF") {
         beep(1);
         shouldTransmit = false;
@@ -429,6 +437,10 @@ void doCommand(String cmd) {
         toggleCamera();
     else if (cmd.startsWith("FORCE,STATE"))
         packet.state = cmd.substring(11).toInt();
+    else {
+        xbeeGS.print("Unknown command: ");
+        xbeeGS.print(cmd + '\r');
+    }
 
     File file = SD.open(cFileName, FILE_WRITE);
     if (file) {
@@ -443,7 +455,7 @@ void loop() {
         gps.encode(Serial2.read());
     if (xbeeTP.available()) {
         String in = xbeeTP.readStringUntil('$');
-        xbeeGS.print(in);
+        xbeeGS.print(in + '\r');
         Serial.println(in);
     }
 
