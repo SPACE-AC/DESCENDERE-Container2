@@ -104,21 +104,22 @@ class BreakSystem {
     void forceBreak() { degree = 180; }
     void forceRelease() { degree = 0; }
     void run() {
-        if (startAt == -1) return;
-        float t = (millis() - startAt) / 1000.0;
-        if (t <= 11.6) {
-            float t_loop = (int(t * 100) % 145) / 100.0;
-            if (t_loop <= 0.1)
-                degree = mapf(t_loop, 0, 0.1, 180, 0);
-            else if (t_loop <= 0.65)
+        if (startAt != -1) {
+            float t = (millis() - startAt) / 1000.0;
+            if (t <= 11.6) {
+                float t_loop = (int(t * 100) % 145) / 100.0;
+                if (t_loop <= 0.1)
+                    degree = mapf(t_loop, 0, 0.1, 180, 0);
+                else if (t_loop <= 0.65)
+                    degree = 0;
+                else if (t_loop <= 0.95)
+                    degree = mapf(t_loop, 0.65, 0.95, 0, 180);
+                else if (t_loop <= 1.45)
+                    degree = 180;
+            } else if (t >= 12.6) {
                 degree = 0;
-            else if (t_loop <= 0.95)
-                degree = mapf(t_loop, 0.65, 0.95, 0, 180);
-            else if (t_loop <= 1.45)
-                degree = 180;
-        } else if (t >= 12.6) {
-            degree = 0;
-            startAt = -1;
+                startAt = -1;
+            }
         }
         servoBreak.write(degree);
     }
@@ -177,14 +178,17 @@ void beep(const unsigned int& count, const unsigned int& delay_ms = 100) {
 }
 
 void toggleCamera() {
+    xbeeGS.print("Toggling camera\r");
+    // return;
     digitalWrite(CAMERA_PIN, LOW);
-    delay(550);
+    delay(600);
     digitalWrite(CAMERA_PIN, HIGH);
+    xbeeGS.print("Camera toggled\r");
 }
 
 void setParachute(bool open) {
     packet.payloadReleased = open;
-    servoParachute.write(open ? 15 : 105);
+    servoParachute.write(open ? 20 : 120);
 }
 
 void getGPSData() {
@@ -250,6 +254,8 @@ void recovery() {
         file.close();
     }
 
+    digitalWrite(CAMERA_PIN, HIGH);
+
     beep(3);
 }
 
@@ -267,8 +273,6 @@ void setup() {
     servoParachute.attach(SERVO_PARA_PIN);
     servoBreak.attach(SERVO_BREAK_PIN);
     pinMode(VOLTAGE_PIN, INPUT);
-
-    digitalWrite(CAMERA_PIN, HIGH);
 
     digitalWrite(BUZZER_PIN, HIGH);
     delay(1000);
@@ -337,7 +341,7 @@ void stateLogic() {
                 breakSystem.start();
                 packet.payloadReleased = true;
                 for (int i = 0; i < 5; i++) {
-                    xbeeTP.print("ON");
+                    xbeeTP.print("ON\r\r\r");
                     delay(50);
                 }
                 EEPROM.update(shouldPollPayloadAddr, shouldPollPayload);
@@ -346,17 +350,19 @@ void stateLogic() {
 
         // TPDEPLOY
         case 4:
-            if (!isCamOff && millis() - startPayloadDeployAt > 20000)
+            if (!isCamOff && millis() - startPayloadDeployAt > 20000) {
                 toggleCamera();
-            // Entry of LAND state
-            if (packet.altitude <= 5) {
-                packet.state = 5;
-                shouldTransmit = false;
-                for (int i = 0; i < 5; i++) {
-                    xbeeTP.print("OFF");
-                    delay(50);
-                }
+                isCamOff = true;
             }
+            // // Entry of LAND state
+            // if (packet.altitude <= 5) {
+            //     packet.state = 5;
+            //     shouldTransmit = false;
+            //     for (int i = 0; i < 5; i++) {
+            //         xbeeTP.print("OFF\r\r\r");
+            //         delay(50);
+            //     }
+            // }
             break;
 
         // LAND
@@ -376,8 +382,11 @@ void stateLogic() {
     }
 }
 
+uint32_t lastCommandAt = 0;
 void doCommand(String cmd) {
     packet.lastCmd = cmd.substring(0, cmd.indexOf(",")) + cmd.substring(cmd.indexOf(",") + 1);
+    if (millis() - lastCommandAt < 1000) return;
+    lastCommandAt = millis();
     if (cmd == "CX,ON") {
         beep(2);
         shouldTransmit = true;
@@ -492,7 +501,7 @@ void loop() {
     }
     if (shouldTransmit && millis() - lastTransmit >= 1000) {
         lastTransmit = millis();
-        Serial.print(packet.combine());
+        Serial.println(packet.combine());
         xbeeGS.print(packet.combine());
         packet.packetCount++;
         EEPROM.update(pkgAddr, packet.packetCount);
