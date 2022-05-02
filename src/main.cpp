@@ -56,7 +56,7 @@ Servo servoParachute;
 Servo servoBreak;
 time_t RTCTime;
 
-bool shouldTransmit, shouldPollPayload = false;
+bool shouldTransmit, shouldPollPayload = false, shouldSendCustom = false;
 float groundAlt;
 float apogee = INT_MIN;
 bool isSimulation = false;
@@ -486,6 +486,9 @@ void doCommand(String cmd) {
         }
     else if (cmd == "FORCE,CCAM")
         toggleCamera();
+    else if (cmd == "FORCE,SENDCUSTOM")
+        shouldSendCustom = !shouldSendCustom;
+
     else if (cmd.startsWith("FORCE,STATE"))
         packet.state = cmd.substring(11).toInt();
     else {
