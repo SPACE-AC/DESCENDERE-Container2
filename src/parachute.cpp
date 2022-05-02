@@ -356,13 +356,13 @@ void stateLogic() {
         // LAUNCH
         case 1:
             // Entry of APOGEE state
-            if (apogee - packet.altitude >= 10 && packet.altitude >= 670) packet.state = 2;
+            if (apogee - packet.altitude >= 10 && packet.altitude >= 10) packet.state = 2;
             break;
 
         // APOGEE
         case 2:
             // Entry of PARADEPLOY state
-            if (packet.altitude <= 410) {
+            if (packet.altitude <= 30) {
                 packet.state = 3;
                 setParachute(true);
             }
@@ -370,6 +370,7 @@ void stateLogic() {
 
         // PARADEPLOY
         case 3:
+            break;
             // Entry of TPDEPLOY state
             if (packet.altitude <= 310) {
                 packet.state = 4;
@@ -440,6 +441,7 @@ void doCommand(String cmd) {
         EEPROM.update(shouldTransmitAddr, shouldTransmit);
         EEPROM.update(pkgAddr, packet.packetCount);
         EEPROM.update(stateAddr, packet.state);
+
         breakSystem.forceBreak();
         isCamOff = true;
     } else if (cmd == "CX,OFF") {
