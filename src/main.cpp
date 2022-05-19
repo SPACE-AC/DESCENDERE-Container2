@@ -9,17 +9,9 @@
 #include <TinyGPSPlus.h>
 #include <Wire.h>
 
-// #define DEBUG
-
-#ifdef DEBUG
-#define DEBUG_PRINT(x) Serial.print(String("[DEBUG] ") + x)
-#define DEBUG_PRINTLN(x) Serial.println(String("[DEBUG] ") + x)
-#else
-#define DEBUG_PRINT(x)
-#define DEBUG_PRINTLN(x)
-#endif
-
 // CONFIG - START
+
+// #define DEBUG
 
 #define LED1_PIN 0
 #define LED2_PIN 1
@@ -30,8 +22,8 @@
 #define SERVO_BREAK_PIN 5
 
 #define VOLTAGE_PIN 21
-#define R1_OHM 3000.0F
-#define R2_OHM 1740.0F
+#define R1_OHM 2000.0F
+#define R2_OHM 1250.0F
 
 #define xbeeGS Serial3
 #define xbeeTP Serial4
@@ -39,6 +31,14 @@
 #define TEAM_ID 1022
 
 // CONFIG - END
+
+#ifdef DEBUG
+#define DEBUG_PRINT(x) Serial.print(String("[DEBUG] ") + x)
+#define DEBUG_PRINTLN(x) Serial.println(String("[DEBUG] ") + x)
+#else
+#define DEBUG_PRINT(x)
+#define DEBUG_PRINTLN(x)
+#endif
 
 #define SEALEVELPRESSURE_HPA 1013.25
 #define gpsSerial Serial2
@@ -49,12 +49,12 @@
 #define groundAltAddr 30
 #define shouldTransmitAddr 40
 #define shouldPollPayloadAddr 50
+#define lastCmdAddr 60
 
 TinyGPSPlus gps;
 Adafruit_BME280 bme;
 Servo servoParachute;
 Servo servoBreak;
-time_t RTCTime;
 
 bool shouldTransmit, shouldPollPayload = false, shouldSendCustom = false;
 float groundAlt;
@@ -80,7 +80,7 @@ class PacketConstructor {
     float gpsAlt;
     short gpsSat;
     short state;
-    String lastCmd;
+    String lastCmd = "CXON";
 
     inline String getStateString() const {
         if (state < 0 || state > 5) {
@@ -121,8 +121,14 @@ class BreakSystem {
     void halt() {
         startAt = -1;
     }
-    void forceBreak() { degree = 180; }
-    void forceRelease() { degree = 0; }
+    void forceBreak() {
+        degree = 180;
+        servoBreak.write(degree);
+    }
+    void forceRelease() {
+        degree = 0;
+        servoBreak.write(degree);
+    }
     void run() {
         if (startAt != -1) {
             float t = (millis() - startAt) / 1000.0;
@@ -155,7 +161,7 @@ class SimulationHandler {
         simEnabled = true;
         simActivated = false;
     }
-    // @return Whether the operation is successful.
+    // @return Whether simulation mode was previously enabled.
     bool activate() {
         if (!simEnabled) return false;
         simActivated = true;
@@ -215,7 +221,7 @@ void toggleCamera() {
 }
 
 void setParachute(bool open) {
-    servoParachute.write(open ? 20 : 120);
+    servoParachute.write(open ? 135 : 45);
 }
 
 void getGPSData() {
@@ -238,7 +244,7 @@ void getBMEData() {
 void getBattery() {
     float apparentVoltage = analogRead(VOLTAGE_PIN) * 3.3 / 1023.0;
     packet.voltage = apparentVoltage * ((R1_OHM + R2_OHM) / R2_OHM);
-    if (packet.voltage < 5.3) {
+    if (packet.voltage < 5.3 && !Serial) {
         beep(5, 25);
     }
 }
@@ -248,10 +254,11 @@ void recovery() {
     Serial.println("\nRecovering...");
     packet.packetCount = EEPROM.read(pkgAddr);
     packet.state = EEPROM.read(stateAddr);
-    EEPROM.get(modeAddr, isSimulation);
+    isSimulation = EEPROM.read(modeAddr);
     groundAlt = EEPROM.read(groundAltAddr);
-    EEPROM.get(shouldTransmitAddr, shouldTransmit);
-    EEPROM.get(shouldPollPayloadAddr, shouldPollPayload);
+    shouldTransmit = EEPROM.read(shouldTransmitAddr);
+    shouldPollPayload = EEPROM.read(shouldPollPayloadAddr);
+    // packet.lastCmd = EEPROM.read(lastCmdAddr); // later krub
 
     Serial.println("Simulation Mode? " + String(isSimulation ? "Yes" : "No"));
     Serial.println("Should Transmit? " + String(shouldTransmit ? "Yes" : "No"));
@@ -259,6 +266,7 @@ void recovery() {
     Serial.println("Packet Count: " + String(packet.packetCount));
     Serial.println("State: " + packet.getStateString());
     Serial.println("Ground Altitude: " + String(groundAlt));
+    Serial.println("Last Command: " + packet.lastCmd);
     Serial.println();
 
     DEBUG_PRINTLN("declaring file index");
@@ -307,6 +315,7 @@ void setup() {
     pinMode(CAMERA_PIN, OUTPUT);
     servoParachute.attach(SERVO_PARA_PIN);
     servoBreak.attach(SERVO_BREAK_PIN);
+    breakSystem.forceBreak();
     pinMode(VOLTAGE_PIN, INPUT);
     DEBUG_PRINTLN("Pins done.");
 
@@ -350,19 +359,19 @@ void stateLogic() {
         // PRELAUNCH
         case 0:
             // Entry of LAUNCH state
-            if (packet.altitude > 10) packet.state = 1;
+            if (packet.altitude > 30) packet.state = 1;
             break;
 
         // LAUNCH
         case 1:
             // Entry of APOGEE state
-            if (apogee - packet.altitude >= 10 && packet.altitude >= 670) packet.state = 2;
+            if (apogee - packet.altitude >= 10 && packet.altitude >= 60) packet.state = 2;  // testing: (apogee - packet.altitude >= 10 && packet.altitude >= 60)
             break;
 
         // APOGEE
         case 2:
             // Entry of PARADEPLOY state
-            if (packet.altitude <= 410) {
+            if (packet.altitude <= 410) {  // testing: (packet.altitude <= apogee - 15)
                 packet.state = 3;
                 setParachute(true);
             }
@@ -426,6 +435,7 @@ void stateLogic() {
 uint32_t lastCommandAt = 0;
 void doCommand(String cmd) {
     packet.lastCmd = cmd.substring(0, cmd.indexOf(",")) + cmd.substring(cmd.indexOf(",") + 1);
+    // EEPROM.update(lastCmdAddr, packet.lastCmd); // later krub
     if (millis() - lastCommandAt < 1000) return;
     lastCommandAt = millis();
     if (cmd == "CX,ON") {
@@ -456,6 +466,12 @@ void doCommand(String cmd) {
         simHandler.disable();
     } else if (cmd.startsWith("SIMP,")) {
         simHandler.setPressure(cmd.substring(5).toInt());
+    } else if (cmd.startsWith("ST,")) {
+        int hr = cmd.substring(3, 4).toInt();
+        int min = cmd.substring(6, 7).toInt();
+        int sec = cmd.substring(9, 10).toInt();
+        setTime(hr, min, sec, day(), month(), year());
+        xbeeTP.print("ST," + String(hr) + "," + String(min) + "," + String(sec) + "\r\r\r");
     }
     // Custom commands
     else if (cmd == "FORCE,PARADEPLOY")
@@ -488,7 +504,6 @@ void doCommand(String cmd) {
         toggleCamera();
     else if (cmd == "FORCE,SENDCUSTOM")
         shouldSendCustom = !shouldSendCustom;
-
     else if (cmd.startsWith("FORCE,STATE"))
         packet.state = cmd.substring(11).toInt();
     else {
@@ -519,7 +534,7 @@ void loop() {
         beep(1);
         while (Serial.available()) {
             const String cmd = Serial.readStringUntil('\n');
-            if (cmd == "\r") return;
+            if (cmd == "\n") return;
             doCommand(cmd.substring(9));
         }
     }
@@ -541,7 +556,7 @@ void loop() {
     }
 
     breakSystem.run();
-    if (millis() - lastDoStateLogic >= 500) {
+    if (millis() - lastDoStateLogic >= 200) {
         lastDoStateLogic = millis();
         sprintf(packet.time, "%02d:%02d:%02d", hour(), minute(), second());
         getGPSData();
@@ -551,9 +566,14 @@ void loop() {
     if (shouldTransmit && millis() - lastTransmit >= 1000) {
         lastTransmit = millis();
         Serial.println(packet.combine());
-        Serial.println(InternalTemperature.readTemperatureC());
+        // Serial.println(InternalTemperature.readTemperatureC());
         xbeeGS.print(packet.combine());
         packet.packetCount++;
         EEPROM.update(pkgAddr, packet.packetCount);
+
+        if (shouldSendCustom) {
+            Serial.println(packet.combineCustom());
+            xbeeGS.print(packet.combineCustom());
+        }
     }
 }
