@@ -315,6 +315,8 @@ void setup() {
     pinMode(CAMERA_PIN, OUTPUT);
     servoParachute.attach(SERVO_PARA_PIN);
     servoBreak.attach(SERVO_BREAK_PIN);
+    DEBUG_PRINTLN("Closing parachute");
+    setParachute(false);
     breakSystem.forceBreak();
     pinMode(VOLTAGE_PIN, INPUT);
     DEBUG_PRINTLN("Pins done.");
@@ -343,8 +345,6 @@ void setup() {
         beep(5);
     }
 
-    DEBUG_PRINTLN("Closing parachute");
-    setParachute(false);
     DEBUG_PRINTLN("delaying 1 sec");
     delay(1000);
     DEBUG_PRINTLN("gonna recover");
