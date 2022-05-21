@@ -1,9 +1,7 @@
+#include <Adafruit_BME280.h>
 #include <EEPROM.h>
 #include <InternalTemperature.h>
 #include <SD.h>
-#include <SPI.h>
-// #include <Seeed_BME280.h>
-#include <Adafruit_BME280.h>
 #include <Servo.h>
 #include <TimeLib.h>
 #include <TinyGPSPlus.h>
@@ -467,9 +465,9 @@ void doCommand(String cmd) {
     } else if (cmd.startsWith("SIMP,")) {
         simHandler.setPressure(cmd.substring(5).toInt());
     } else if (cmd.startsWith("ST,")) {
-        int hr = cmd.substring(3, 4).toInt();
-        int min = cmd.substring(6, 7).toInt();
-        int sec = cmd.substring(9, 10).toInt();
+        int hr = cmd.substring(3, 5).toInt();
+        int min = cmd.substring(6, 8).toInt();
+        int sec = cmd.substring(9, 11).toInt();
         setTime(hr, min, sec, day(), month(), year());
         xbeeTP.print("ST," + String(hr) + "," + String(min) + "," + String(sec) + "\r\r\r");
     }
