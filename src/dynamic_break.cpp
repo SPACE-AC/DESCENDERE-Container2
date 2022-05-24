@@ -357,29 +357,28 @@ void stateLogic() {
         // PRELAUNCH
         case 0:
             // Entry of LAUNCH state
-            if (packet.altitude > 30) packet.state = 1;
+            if (packet.altitude > 20) packet.state = 1;
             break;
 
         // LAUNCH
         case 1:
             // Entry of APOGEE state
-            if (packet.altitude >= 80) packet.state = 2;  // testing: (apogee - packet.altitude >= 10 && packet.altitude >= 60)
+            if (packet.altitude >= 120) packet.state = 2;  // testing: (apogee - packet.altitude >= 10 && packet.altitude >= 60)
             break;
 
         // APOGEE
         case 2:
             // Entry of PARADEPLOY state
-            if (packet.altitude <= 65) {  // testing: (packet.altitude <= apogee - 15)
+            if (packet.altitude <= 110) {  // testing: (packet.altitude <= apogee - 15)
                 packet.state = 3;
-                setParachute(true);
+                // setParachute(true);
             }
             break;
 
         // PARADEPLOY
         case 3:
             // Entry of TPDEPLOY state
-            break;
-            if (packet.altitude <= 310) {
+            if (packet.altitude <= 110) {
                 packet.state = 4;
                 shouldPollPayload = true;
                 lastPoll = lastTransmit + 125;
@@ -405,7 +404,7 @@ void stateLogic() {
             // Entry of LAND state
             if (packet.altitude <= 5) {
                 packet.state = 5;
-                shouldTransmit = false;
+                // shouldTransmit = false;
                 for (int i = 0; i < 5; i++) {
                     xbeeTP.print("OFF\r\r\r");
                     delay(50);
