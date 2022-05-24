@@ -7,9 +7,7 @@
 #include <TinyGPSPlus.h>
 #include <Wire.h>
 
-// CONFIG - START
-
-// #define DEBUG
+// *** CONFIG - START ***
 
 #define LED1_PIN 0
 #define LED2_PIN 1
@@ -28,7 +26,10 @@
 
 #define TEAM_ID 1022
 
-// CONFIG - END
+// #define USE_360_FOR_PARA
+// #define DEBUG
+
+// *** CONFIG - END ***
 
 #ifdef DEBUG
 #define DEBUG_PRINT(x) Serial.print(String("[DEBUG] ") + x)
@@ -220,10 +221,28 @@ void toggleCamera() {
     xbeeGS.print("Camera toggled\r");
 }
 
+#ifdef USE_360_FOR_PARA
+void setParachute(bool open) {
+    // PROCEED TO CLOSE
+    if (!open && isParachuteOn) {
+        servoParachute.write(100);
+        delay(50);
+        servoParachute.write(90);
+    }
+    // PROCEED TO OPEN
+    if (open && !isParachuteOn) {
+        servoParachute.write(80);
+        delay(50);
+        servoParachute.write(90);
+    }
+    isParachuteOn = open;
+}
+#else
 void setParachute(bool open) {
     servoParachute.write(open ? 90 : 0);
     isParachuteOn = open;
 }
+#endif
 
 void getGPSData() {
     packet.gpsLat = gps.location.lat();
@@ -393,13 +412,13 @@ void stateLogic() {
             // LAUNCH
             case 1:
                 // Entry of APOGEE state
-                if (chosenAlt >= 180 || apogee - chosenAlt >= 10) packet.state = 2;  // testing: (apogee - chosenAlt >= 10 && chosenAlt >= 60)
+                if (chosenAlt >= 100 || apogee - chosenAlt >= 10) packet.state = 2;  // testing: (apogee - chosenAlt >= 10 && chosenAlt >= 60)
                 break;
 
             // APOGEE
             case 2:
                 // Entry of PARADEPLOY state
-                if (chosenAlt <= 0.6 * apogee) {  // testing: (chosenAlt <= apogee - 15)
+                if (chosenAlt <= (apogee > 100 ? 0.6 * apogee : 70)) {  // testing: (chosenAlt <= apogee - 15)
                     packet.state = 3;
                     setParachute(true);
                 }
@@ -408,7 +427,7 @@ void stateLogic() {
             // PARADEPLOY
             case 3:
                 // Entry of TPDEPLOY state
-                if (chosenAlt <= 0.45 * apogee) {
+                if (chosenAlt <= (apogee > 100 ? 0.45 * apogee : 50)) {
                     packet.state = 4;
                     shouldPollPayload = true;
                     lastPoll = lastTransmit + 125;
@@ -434,7 +453,7 @@ void stateLogic() {
                 // Entry of LAND state
                 if (chosenAlt <= 5) {
                     packet.state = 5;
-                    // shouldTransmit = false;
+                    // shouldTransmit = false; // ! DO NOT FORGET TO UNCOMMENT BEFORE REAL MISSION
                     for (int i = 0; i < 5; i++) {
                         xbeeTP.print("OFF\r\r\r");
                         delay(50);
@@ -511,11 +530,13 @@ void doCommand(String cmd) {
         breakSystem.forceBreak();
     else if (cmd == "FORCE,POLL")
         xbeeTP.print("POLL\r\r\r");
-    else if (cmd == "FORCE,POLLON")
+    else if (cmd == "FORCE,POLLON") {
         shouldPollPayload = true;
-    else if (cmd == "FORCE,POLLOFF")
+        EEPROM.update(shouldPollPayloadAddr, shouldPollPayload);
+    } else if (cmd == "FORCE,POLLOFF") {
         shouldPollPayload = false;
-    else if (cmd == "FORCE,TPON")
+        EEPROM.update(shouldPollPayloadAddr, shouldPollPayload);
+    } else if (cmd == "FORCE,TPON")
         for (int i = 0; i < 5; i++) {
             xbeeTP.print("ON\r\r\r");
             delay(50);
@@ -602,9 +623,11 @@ void loop() {
         }
     }
 
-    if (millis() - lastKradik > 200 && isParachuteOn) {
+#ifndef USE_360_FOR_PARA
+    if (millis() - lastKradik > 400 && isParachuteOn) {
         lastKradik = millis();
-        servoParachute.write(kradikBool ? 83 : 97);
+        servoParachute.write(kradikBool ? 70 : 97);
         kradikBool = !kradikBool;
     }
+#endif
 }
