@@ -59,7 +59,9 @@ float groundAlt;
 float apogee = INT_MIN;
 bool isSimulation = false;
 
-unsigned long lastTransmit = 0, lastDoStateLogic = 0, lastPoll = 0;
+unsigned long lastTransmit = 0, lastDoStateLogic = 0, lastPoll = 0, lastKradik = 0;
+bool isParachuteOn = false;
+bool kradikBool = false;
 
 class PacketConstructor {
    private:
@@ -220,6 +222,7 @@ void toggleCamera() {
 
 void setParachute(bool open) {
     servoParachute.write(open ? 90 : 0);
+    isParachuteOn = open;
 }
 
 void getGPSData() {
@@ -290,6 +293,8 @@ void recovery() {
         file.println("Packet Count: " + packet.packetCount);
         file.println("State: " + packet.getStateString());
         file.println("Ground Altitude: " + String(groundAlt));
+
+        file.println("TEAM_ID,MISSION_TIME,PACKET_COUNT,PACKET_TYPE,MODE,TP_RELEASED,ALTITUDE,TEMP,VOLTAGE,GPS_TIME,GPS_LATITUDE,GPS_LONGITUDE,GPS_ALTITUDE,GPS_SATS,SOFTWARE_STATE,CMD_ECHO");
         file.close();
     }
     DEBUG_PRINTLN("wrote file and setting cam");
@@ -351,83 +356,105 @@ void setup() {
 
 uint32_t startPayloadDeployAt;
 bool isCamOff = true;
+unsigned short witnessRound = 0;
+float witnessValues[5];
+float witnessSum = 0;
 void stateLogic() {
     getBMEData();
-    switch (packet.state) {
-        // PRELAUNCH
-        case 0:
-            // Entry of LAUNCH state
-            if (packet.altitude > 30) packet.state = 1;
-            break;
-
-        // LAUNCH
-        case 1:
-            // Entry of APOGEE state
-            if (packet.altitude >= 270) packet.state = 2;  // testing: (apogee - packet.altitude >= 10 && packet.altitude >= 60)
-            break;
-
-        // APOGEE
-        case 2:
-            // Entry of PARADEPLOY state
-            if (packet.altitude <= 255) {  // testing: (packet.altitude <= apogee - 15)
-                packet.state = 3;
-                setParachute(true);
-            }
-            break;
-
-        // PARADEPLOY
-        case 3:
-            // Entry of TPDEPLOY state
-            if (packet.altitude <= 225) {
-                packet.state = 4;
-                shouldPollPayload = true;
-                lastPoll = lastTransmit + 125;
-                startPayloadDeployAt = millis();
-                isCamOff = false;
-                toggleCamera();
-                breakSystem.start();
-                packet.payloadReleased = true;
-                for (int i = 0; i < 5; i++) {
-                    xbeeTP.print("ON\r\r\r");
-                    delay(50);
-                }
-                EEPROM.update(shouldPollPayloadAddr, shouldPollPayload);
-            }
-            break;
-
-        // TPDEPLOY
-        case 4:
-            if (!isCamOff && millis() - startPayloadDeployAt > 20000) {
-                toggleCamera();
-                isCamOff = true;
-            }
-            // Entry of LAND state
-            if (packet.altitude <= 5) {
-                packet.state = 5;
-                // shouldTransmit = false;
-                for (int i = 0; i < 5; i++) {
-                    xbeeTP.print("OFF\r\r\r");
-                    delay(50);
-                }
-            }
-            break;
-
-        // LAND
-        case 5:
-            digitalWrite(BUZZER_PIN, HIGH);
-            delay(500);
-            digitalWrite(BUZZER_PIN, LOW);
-            delay(500);
-            break;
-    }
-    EEPROM.update(stateAddr, packet.state);
-
     File file = SD.open(cFileName, FILE_WRITE);
     if (file) {
-        file.println(packet.combine());
-        file.println(InternalTemperature.readTemperatureC());
+        file.print(packet.combine());
         file.close();
     }
+    if (witnessRound > 4) {
+        float average = witnessSum / 5;
+        float leastDelta = INT_MAX, chosenAlt;
+        for (int i = 0; i < 5; i++) {
+            if (abs(witnessValues[i] - average) < leastDelta) {
+                leastDelta = abs(witnessValues[i] - average);
+                chosenAlt = witnessValues[i];
+            }
+        }
+        witnessRound = 0;
+        witnessSum = 0;
+        File file = SD.open(cFileName, FILE_WRITE);
+        if (file) {
+            file.print(chosenAlt);
+            file.close();
+        }
+        Serial.println(chosenAlt);
+        switch (packet.state) {
+            // PRELAUNCH
+            case 0:
+                // Entry of LAUNCH state
+                if (chosenAlt > 30) packet.state = 1;
+                break;
+
+            // LAUNCH
+            case 1:
+                // Entry of APOGEE state
+                if (chosenAlt >= 180 || apogee - chosenAlt >= 10) packet.state = 2;  // testing: (apogee - chosenAlt >= 10 && chosenAlt >= 60)
+                break;
+
+            // APOGEE
+            case 2:
+                // Entry of PARADEPLOY state
+                if (chosenAlt <= 0.6 * apogee) {  // testing: (chosenAlt <= apogee - 15)
+                    packet.state = 3;
+                    setParachute(true);
+                }
+                break;
+
+            // PARADEPLOY
+            case 3:
+                // Entry of TPDEPLOY state
+                if (chosenAlt <= 0.45 * apogee) {
+                    packet.state = 4;
+                    shouldPollPayload = true;
+                    lastPoll = lastTransmit + 125;
+                    startPayloadDeployAt = millis();
+                    isCamOff = false;
+                    toggleCamera();
+                    breakSystem.start();
+                    packet.payloadReleased = true;
+                    for (int i = 0; i < 5; i++) {
+                        xbeeTP.print("ON\r\r\r");
+                        delay(50);
+                    }
+                    EEPROM.update(shouldPollPayloadAddr, shouldPollPayload);
+                }
+                break;
+
+            // TPDEPLOY
+            case 4:
+                if (!isCamOff && millis() - startPayloadDeployAt > 20000) {
+                    toggleCamera();
+                    isCamOff = true;
+                }
+                // Entry of LAND state
+                if (chosenAlt <= 5) {
+                    packet.state = 5;
+                    // shouldTransmit = false;
+                    for (int i = 0; i < 5; i++) {
+                        xbeeTP.print("OFF\r\r\r");
+                        delay(50);
+                    }
+                }
+                break;
+
+            // LAND
+            case 5:
+                digitalWrite(BUZZER_PIN, HIGH);
+                delay(500);
+                digitalWrite(BUZZER_PIN, LOW);
+                delay(500);
+                break;
+        }
+    }
+    witnessValues[witnessRound++] = packet.altitude;
+    witnessSum += packet.altitude;
+
+    EEPROM.update(stateAddr, packet.state);
 }
 
 uint32_t lastCommandAt = 0;
@@ -554,15 +581,15 @@ void loop() {
     }
 
     breakSystem.run();
-    if (millis() - lastDoStateLogic >= 200) {
+    if (millis() - lastDoStateLogic >= 40) {
         lastDoStateLogic = millis();
         sprintf(packet.time, "%02d:%02d:%02d", hour(), minute(), second());
-        getGPSData();
         getBattery();
         stateLogic();
     }
     if (shouldTransmit && millis() - lastTransmit >= 1000) {
         lastTransmit = millis();
+        getGPSData();
         Serial.println(packet.combine());
         // Serial.println(InternalTemperature.readTemperatureC());
         xbeeGS.print(packet.combine());
@@ -573,5 +600,11 @@ void loop() {
             Serial.println(packet.combineCustom());
             xbeeGS.print(packet.combineCustom());
         }
+    }
+
+    if (millis() - lastKradik > 200 && isParachuteOn) {
+        lastKradik = millis();
+        servoParachute.write(kradikBool ? 83 : 97);
+        kradikBool = !kradikBool;
     }
 }
