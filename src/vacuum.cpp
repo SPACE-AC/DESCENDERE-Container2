@@ -72,7 +72,7 @@ class PacketConstructor {
     }
 }(packet);
 
-class BreakSystem {
+class BrakeSystem {
    private:
     uint32_t startAt = -1;
     float degree = 180;
@@ -109,7 +109,7 @@ class BreakSystem {
         }
         servoBreak.write(degree);
     }
-}(breakSystem);
+}(brakeSystem);
 class CommandHandler {
 };
 
@@ -235,7 +235,7 @@ void stateLogic() {
             if (packet.altitude <= 310) {
                 packet.state = 4;
                 packet.payloadReleased = true;
-                breakSystem.start();
+                brakeSystem.start();
             }
             break;
 
@@ -265,7 +265,7 @@ void stateLogic() {
 unsigned long lastTransmit = 0;
 unsigned long lastStateLogic = 0;
 void loop() {
-    breakSystem.run();
+    brakeSystem.run();
     if (millis() - lastStateLogic > 500) {
         lastStateLogic = millis();
         stateLogic();

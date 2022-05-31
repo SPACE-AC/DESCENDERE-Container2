@@ -103,7 +103,7 @@ class PacketConstructor {
     }
 }(packet);
 
-class BreakSystem {
+class BrakeSystem {
    private:
     long startAt = -1;
     float degree = 180;
@@ -147,7 +147,7 @@ class BreakSystem {
         }
         servoBreak.write(degree);
     }
-}(breakSystem);
+}(brakeSystem);
 
 class SimulationHandler {
    private:
@@ -315,7 +315,7 @@ void setup() {
     servoBreak.attach(SERVO_BREAK_PIN);
     DEBUG_PRINTLN("Closing parachute");
     setParachute(false);
-    breakSystem.forceBreak();
+    brakeSystem.forceBreak();
     pinMode(VOLTAGE_PIN, INPUT);
     DEBUG_PRINTLN("Pins done.");
 
@@ -385,7 +385,7 @@ void stateLogic() {
                 startPayloadDeployAt = millis();
                 isCamOff = false;
                 toggleCamera();
-                breakSystem.start();
+                brakeSystem.start();
                 packet.payloadReleased = true;
                 for (int i = 0; i < 5; i++) {
                     xbeeTP.print("ON\r\r\r");
@@ -448,7 +448,7 @@ void doCommand(String cmd) {
         EEPROM.update(shouldTransmitAddr, shouldTransmit);
         EEPROM.update(pkgAddr, packet.packetCount);
         EEPROM.update(stateAddr, packet.state);
-        breakSystem.forceBreak();
+        brakeSystem.forceBreak();
         isCamOff = true;
     } else if (cmd == "CX,OFF") {
         beep(1);
@@ -475,13 +475,13 @@ void doCommand(String cmd) {
     else if (cmd == "FORCE,PARADEPLOY")
         setParachute(true);
     else if (cmd == "FORCE,SEQUENCE")
-        breakSystem.start();
+        brakeSystem.start();
     else if (cmd == "FORCE,HALT")
-        breakSystem.halt();
+        brakeSystem.halt();
     else if (cmd == "FORCE,RELEASE")
-        breakSystem.forceRelease();
+        brakeSystem.forceRelease();
     else if (cmd == "FORCE,BREAK")
-        breakSystem.forceBreak();
+        brakeSystem.forceBreak();
     else if (cmd == "FORCE,POLL")
         xbeeTP.print("POLL\r\r\r");
     else if (cmd == "FORCE,POLLON")
@@ -553,7 +553,7 @@ void loop() {
         xbeeTP.print("POLL\r\r\r");
     }
 
-    breakSystem.run();
+    brakeSystem.run();
     if (millis() - lastDoStateLogic >= 200) {
         lastDoStateLogic = millis();
         sprintf(packet.time, "%02d:%02d:%02d", hour(), minute(), second());
