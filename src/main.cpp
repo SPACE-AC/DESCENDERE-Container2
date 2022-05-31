@@ -3,13 +3,12 @@
 #include <InternalTemperature.h>
 #include <SD.h>
 #include <Servo.h>
+#include <SimpleKalmanFilter.h>
 #include <TimeLib.h>
 #include <TinyGPSPlus.h>
 #include <Wire.h>
 
-// CONFIG - START
-
-// #define DEBUG
+// *** CONFIG - START ***
 
 #define LED1_PIN 0
 #define LED2_PIN 1
@@ -28,7 +27,10 @@
 
 #define TEAM_ID 1022
 
-// CONFIG - END
+// #define USE_360_FOR_PARA
+// #define DEBUG
+
+// *** CONFIG - END ***
 
 #ifdef DEBUG
 #define DEBUG_PRINT(x) Serial.print(String("[DEBUG] ") + x)
@@ -47,19 +49,26 @@
 #define groundAltAddr 30
 #define shouldTransmitAddr 40
 #define shouldPollPayloadAddr 50
-#define lastCmdAddr 60
+#define pressureOffsetAddr 60
 
 TinyGPSPlus gps;
 Adafruit_BME280 bme;
 Servo servoParachute;
 Servo servoBreak;
+SimpleKalmanFilter altitudeFilter(1, 1, 0.01);
 
 bool shouldTransmit, shouldPollPayload = false, shouldSendCustom = false;
 float groundAlt;
 float apogee = INT_MIN;
 bool isSimulation = false;
+float pressureOffset;
 
-unsigned long lastTransmit = 0, lastDoStateLogic = 0, lastPoll = 0;
+unsigned long lastTransmit = 0, lastDoStateLogic = 0, lastPoll = 0, lastKradik = 0, lastSD = 0;
+bool isParachuteOn = false;
+bool kradikBool = false;
+
+char cFileName[100], cDebugFileName[100], pFileName[100];
+File cFile, cDebugFile, pFile;
 
 class PacketConstructor {
    private:
@@ -95,7 +104,7 @@ class PacketConstructor {
     }
 
     String combine() {
-        return String(TEAM_ID) + "," + time + "," + packetCount + ",C," + (isSimulation ? 'S' : 'F') + "," + (payloadReleased ? 'R' : 'N') + "," + String(altitude, 2) + "," + String(temp, 2) + "," + String(voltage) + "," + String(gpsTime) + "," + String(gpsLat, 6) + "," + String(gpsLng, 6) + "," + String(gpsAlt) + "," + String(gpsSat) + "," + getStateString() + "," + lastCmd + "\r";
+        return String(TEAM_ID) + "," + time + "," + packetCount + ",C," + (isSimulation ? 'S' : 'F') + "," + (payloadReleased ? 'R' : 'N') + "," + String(altitude, 2) + "," + String(temp, 2) + "," + String(voltage, 2) + "," + String(gpsTime) + "," + String(gpsLat, 6) + "," + String(gpsLng, 6) + "," + String(gpsAlt) + "," + String(gpsSat) + "," + getStateString() + "," + lastCmd + "\r";
     }
 
     String combineCustom() {
@@ -107,6 +116,9 @@ class BrakeSystem {
    private:
     long startAt = -1;
     float degree = 180;
+    short mode = 1;
+    unsigned short count = 0;
+    uint32_t fastModeDelay;
 
     double mapf(double x, double in_min, double in_max, double out_min, double out_max) const {
         return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
@@ -115,6 +127,9 @@ class BrakeSystem {
    public:
     void start() {
         startAt = millis();
+        fastModeDelay = 0;
+        count = 0;
+        if (mode == 2) degree = 0;
     }
     void halt() {
         startAt = -1;
@@ -127,22 +142,90 @@ class BrakeSystem {
         degree = 0;
         servoBreak.write(degree);
     }
+    void setMode(short newMode) {
+        mode = newMode;
+    }
     void run() {
         if (startAt != -1) {
             float t = (millis() - startAt) / 1000.0;
-            if (t <= 11.6) {
-                float t_loop = (int(t * 100) % 145) / 100.0;
-                if (t_loop <= 0.1)
-                    degree = mapf(t_loop, 0, 0.1, 180, 0);
-                else if (t_loop <= 0.65)
+            if (mode == 0) {
+                if (t <= 11.6) {
+                    float t_loop = (int(t * 100) % 145) / 100.0;
+                    if (t_loop <= 0.1)
+                        degree = mapf(t_loop, 0, 0.1, 180, 0);
+                    else if (t_loop <= 0.65)
+                        degree = 0;
+                    else if (t_loop <= 0.95)
+                        degree = mapf(t_loop, 0.65, 0.95, 0, 180);
+                    else if (t_loop <= 1.45)
+                        degree = 180;
+                } else if (t >= 12.6) {
                     degree = 0;
-                else if (t_loop <= 0.95)
-                    degree = mapf(t_loop, 0.65, 0.95, 0, 180);
-                else if (t_loop <= 1.45)
-                    degree = 180;
-            } else if (t >= 12.6) {
-                degree = 0;
-                startAt = -1;
+                    startAt = -1;
+                }
+            } else if (mode == 1) {
+                if (count < 50) {
+                    if (millis() - fastModeDelay > 500) {
+                        fastModeDelay = millis();
+                        degree = degree == 0 ? 180 : 0;
+                        count++;
+                    }
+                } else if (count < 80) {
+                    if (millis() - fastModeDelay > 200) {
+                        fastModeDelay = millis();
+                        degree = degree == 0 ? 180 : 0;
+                        count++;
+                    }
+                } else {
+                    degree = 0;
+                    startAt = -1;
+                }
+            } else if (mode == 2) {
+                if (t <= 2 * 5) {
+                    float t_loop = fmod(t, 2);
+                    degree = mapf(t_loop, 0, 2, 0, 180);
+                } else {
+                    degree = 0;
+                    startAt = -1;
+                }
+            } else if (mode == 3) {
+                if (t <= 15.2) {
+                    // float t_loop = (int(t * 100) % 145) / 100.0;
+                    float t_loop = fmod(t, 1.9);
+                    if (t_loop <= 0.1)
+                        degree = mapf(t_loop, 0, 0.1, 180, 0);
+                    else if (t_loop <= 1.1)
+                        degree = 0;
+                    else if (t_loop <= 1.4)
+                        degree = mapf(t_loop, 1.1, 1.4, 0, 180);
+                    else if (t_loop <= 1.9)
+                        degree = 180;
+                } else if (t >= 16.2 && t <= 26.2 && millis() - fastModeDelay > 200) {
+                    fastModeDelay = millis();
+                    degree = degree == 0 ? 180 : 0;
+                } else if (t >= 26.2) {
+                    degree = 0;
+                    startAt = -1;
+                }
+            } else if (mode == 4) {
+                if (t <= 15.2) {
+                    // float t_loop = (int(t * 100) % 145) / 100.0;
+                    float t_loop = fmod(t, 1.9);
+                    if (t_loop <= 0.1)
+                        degree = mapf(t_loop, 0, 0.1, 120, 0);
+                    else if (t_loop <= 1.1)
+                        degree = 0;
+                    else if (t_loop <= 1.4)
+                        degree = mapf(t_loop, 1.1, 1.4, 0, 120);
+                    else if (t_loop <= 1.9)
+                        degree = 120;
+                } else if (t >= 16.2 && t <= 26.2 && millis() - fastModeDelay > 200) {
+                    fastModeDelay = millis();
+                    degree = degree == 0 ? 180 : 0;
+                } else if (t >= 26.2) {
+                    degree = 0;
+                    startAt = -1;
+                }
             }
         }
         servoBreak.write(degree);
@@ -218,9 +301,28 @@ void toggleCamera() {
     xbeeGS.print("Camera toggled\r");
 }
 
+#ifdef USE_360_FOR_PARA
+void setParachute(bool open) {
+    // PROCEED TO CLOSE
+    if (!open && isParachuteOn) {
+        servoParachute.write(100);
+        delay(50);
+        servoParachute.write(90);
+    }
+    // PROCEED TO OPEN
+    if (open && !isParachuteOn) {
+        servoParachute.write(80);
+        delay(50);
+        servoParachute.write(90);
+    }
+    isParachuteOn = open;
+}
+#else
 void setParachute(bool open) {
     servoParachute.write(open ? 90 : 0);
+    isParachuteOn = open;
 }
+#endif
 
 void getGPSData() {
     packet.gpsLat = gps.location.lat();
@@ -230,9 +332,32 @@ void getGPSData() {
     packet.gpsSat = gps.satellites.value();
 }
 
+// short bcount = 0;
 void getBMEData() {
     packet.temp = bme.readTemperature();
-    packet.altitude = isSimulation ? simHandler.calcAltitude() : (bme.readAltitude(SEALEVELPRESSURE_HPA) - groundAlt);
+    float sensorAlt = bme.readAltitude(SEALEVELPRESSURE_HPA) + pressureOffset;
+    // bcount++;
+    // if (bcount > 100) {
+    //     packet.altitude += 10000;
+    //     if (bcount > 101) bcount = 0;
+    // }
+
+    Serial.print(sensorAlt);
+    if (!cDebugFile) cDebugFile = SD.open(cDebugFileName, FILE_WRITE);
+    if (cDebugFile) {
+        cDebugFile.print(packet.time);
+        cDebugFile.print(" ");
+        cDebugFile.print(packet.altitude);
+    }
+    sensorAlt = altitudeFilter.updateEstimate(sensorAlt);
+    Serial.print(",");
+    Serial.println(sensorAlt);
+    if (cDebugFile) {
+        cDebugFile.print(", ");
+        cDebugFile.println(packet.altitude);
+        cDebugFile.flush();
+    }
+    packet.altitude = (isSimulation ? simHandler.calcAltitude() : sensorAlt) - groundAlt;
     // if (packet.altitude < -500 || packet.altitude > 800) return;
     if (packet.altitude >= apogee) {
         apogee = packet.altitude;
@@ -247,7 +372,6 @@ void getBattery() {
     }
 }
 
-char cFileName[100], pFileName[100];
 void recovery() {
     Serial.println("\nRecovering...");
     packet.packetCount = EEPROM.read(pkgAddr);
@@ -256,6 +380,7 @@ void recovery() {
     groundAlt = EEPROM.read(groundAltAddr);
     shouldTransmit = EEPROM.read(shouldTransmitAddr);
     shouldPollPayload = EEPROM.read(shouldPollPayloadAddr);
+    pressureOffset = EEPROM.read(pressureOffsetAddr);
     // packet.lastCmd = EEPROM.read(lastCmdAddr); // later krub
 
     Serial.println("Simulation Mode? " + String(isSimulation ? "Yes" : "No"));
@@ -264,25 +389,31 @@ void recovery() {
     Serial.println("Packet Count: " + String(packet.packetCount));
     Serial.println("State: " + packet.getStateString());
     Serial.println("Ground Altitude: " + String(groundAlt));
-    Serial.println("Last Command: " + packet.lastCmd);
+    Serial.println("Pressure Offset: " + String(pressureOffset));
+    // Serial.println("Last Command: " + packet.lastCmd);
     Serial.println();
+
+    sprintf(packet.time, "%02d:%02d:%02d", hour(), minute(), second());
+    xbeeGS.print(String(TEAM_ID) + "," + packet.time + "," + packet.packetCount + ",X," + isSimulation + "," + shouldTransmit + "," + shouldPollPayload + "," + packet.packetCount + "," + packet.getStateString() + "," + groundAlt + "," + pressureOffset + "\r");
+    Serial.print(String(TEAM_ID) + "," + packet.time + "," + packet.packetCount + ",X," + isSimulation + "," + shouldTransmit + "," + shouldPollPayload + "," + packet.packetCount + "," + packet.getStateString() + "," + groundAlt + "," + pressureOffset + "\n");
 
     DEBUG_PRINTLN("declaring file index");
     int fileIndex = 0;
     do {
         DEBUG_PRINTLN("incrementing file index");
         fileIndex++;
-        String("C_" + String(fileIndex) + ".txt").toCharArray(cFileName, 100);
+        String("C_" + String(fileIndex) + ".csv").toCharArray(cFileName, 100);
     } while (SD.exists(cFileName));
     DEBUG_PRINT("got file index: ");
     DEBUG_PRINTLN(fileIndex);
-    String("TP_" + String(fileIndex) + ".txt").toCharArray(pFileName, 100);
+    String("C_DEBUG_" + String(fileIndex) + ".csv").toCharArray(cDebugFileName, 100);
+    String("TP_" + String(fileIndex) + ".csv").toCharArray(pFileName, 100);
     Serial.print("Selected file name: ");
     Serial.print(cFileName);
     Serial.print(" and ");
     Serial.println(pFileName);
     DEBUG_PRINTLN("Opening file");
-    File file = SD.open(cFileName, FILE_WRITE);
+    File file = SD.open(cDebugFileName, FILE_WRITE);
     if (file) {
         file.println("Recovery Successful!");
         file.println("Simulation Mode? " + String(isSimulation ? "Yes" : "No"));
@@ -290,7 +421,9 @@ void recovery() {
         file.println("Packet Count: " + packet.packetCount);
         file.println("State: " + packet.getStateString());
         file.println("Ground Altitude: " + String(groundAlt));
-        file.close();
+
+        file.println("TEAM_ID,MISSION_TIME,PACKET_COUNT,PACKET_TYPE,MODE,TP_RELEASED,ALTITUDE,TEMP,VOLTAGE,GPS_TIME,GPS_LATITUDE,GPS_LONGITUDE,GPS_ALTITUDE,GPS_SATS,SOFTWARE_STATE,CMD_ECHO");
+        file.flush();
     }
     DEBUG_PRINTLN("wrote file and setting cam");
 
@@ -351,84 +484,108 @@ void setup() {
 
 uint32_t startPayloadDeployAt;
 bool isCamOff = true;
+unsigned short witnessRound = 0;
+float witnessValues[5];
+float witnessSum = 0;
+bool hasSentLanded = false;
 void stateLogic() {
     getBMEData();
-    switch (packet.state) {
-        // PRELAUNCH
-        case 0:
-            // Entry of LAUNCH state
-            if (packet.altitude > 30) packet.state = 1;
-            break;
+    getGPSData();
 
-        // LAUNCH
-        case 1:
-            // Entry of APOGEE state
-            if (packet.altitude >= 80) packet.state = 2;  // testing: (apogee - packet.altitude >= 10 && packet.altitude >= 60)
-            break;
-
-        // APOGEE
-        case 2:
-            // Entry of PARADEPLOY state
-            if (packet.altitude <= 65) {  // testing: (packet.altitude <= apogee - 15)
-                packet.state = 3;
-                setParachute(true);
+    if (witnessRound > 4) {
+        float average = witnessSum / 5;
+        float leastDelta = INT_MAX, chosenAlt;
+        for (int i = 0; i < 5; i++) {
+            if (abs(witnessValues[i] - average) < leastDelta) {
+                leastDelta = abs(witnessValues[i] - average);
+                chosenAlt = witnessValues[i];
             }
-            break;
+        }
+        witnessRound = 0;
+        witnessSum = 0;
+        // if (!cDebugFile) cDebugFile = SD.open(cDebugFileName, FILE_WRITE);
+        // if (cDebugFile) {
+        //     cDebugFile.print(packet.time);
+        //     cDebugFile.print(" Chosen Altitude: ");
+        //     cDebugFile.println(chosenAlt);
+        //     cDebugFile.flush();
+        // }
+        switch (packet.state) {
+            // PRELAUNCH
+            case 0:
+                // Entry of LAUNCH state
+                if (chosenAlt > 30) packet.state = 1;
+                break;
 
-        // PARADEPLOY
-        case 3:
-            // Entry of TPDEPLOY state
-            break;
-            if (packet.altitude <= 310) {
-                packet.state = 4;
-                shouldPollPayload = true;
-                lastPoll = lastTransmit + 125;
-                startPayloadDeployAt = millis();
-                isCamOff = false;
-                toggleCamera();
-                brakeSystem.start();
-                packet.payloadReleased = true;
-                for (int i = 0; i < 5; i++) {
-                    xbeeTP.print("ON\r\r\r");
-                    delay(50);
+            // LAUNCH
+            case 1:
+                // Entry of APOGEE state
+                if (chosenAlt >= 100 || apogee - chosenAlt >= 10) packet.state = 2;  // testing: (apogee - chosenAlt >= 10 && chosenAlt >= 60)
+                break;
+
+            // APOGEE
+            case 2:
+                // Entry of PARADEPLOY state
+                if (chosenAlt <= (apogee > 100 ? 0.6 * apogee : 70)) {  // testing: (chosenAlt <= apogee - 15)
+                    packet.state = 3;
+                    setParachute(true);
                 }
-                EEPROM.update(shouldPollPayloadAddr, shouldPollPayload);
-            }
-            break;
+                break;
 
-        // TPDEPLOY
-        case 4:
-            if (!isCamOff && millis() - startPayloadDeployAt > 20000) {
-                toggleCamera();
-                isCamOff = true;
-            }
-            // Entry of LAND state
-            if (packet.altitude <= 5) {
-                packet.state = 5;
-                shouldTransmit = false;
-                for (int i = 0; i < 5; i++) {
-                    xbeeTP.print("OFF\r\r\r");
-                    delay(50);
+            // PARADEPLOY
+            case 3:
+                // Entry of TPDEPLOY state
+                if (chosenAlt <= (apogee > 100 ? 0.45 * apogee : 50)) {
+                    packet.state = 4;
+                    shouldPollPayload = true;
+                    lastPoll = lastTransmit + 125;
+                    startPayloadDeployAt = millis();
+                    isCamOff = false;
+                    toggleCamera();
+                    brakeSystem.start();
+                    packet.payloadReleased = true;
+                    for (int i = 0; i < 5; i++) {
+                        xbeeTP.print("ON\r\r\r");
+                        delay(50);
+                    }
+                    EEPROM.update(shouldPollPayloadAddr, shouldPollPayload);
                 }
-            }
-            break;
+                break;
 
-        // LAND
-        case 5:
-            digitalWrite(BUZZER_PIN, HIGH);
-            delay(500);
-            digitalWrite(BUZZER_PIN, LOW);
-            delay(500);
-            break;
+            // TPDEPLOY
+            case 4:
+                if (!isCamOff && millis() - startPayloadDeployAt > 20000) {
+                    toggleCamera();
+                    isCamOff = true;
+                }
+                // Entry of LAND state
+                if (chosenAlt <= 5) {
+                    packet.state = 5;
+                    hasSentLanded = false;
+                    for (int i = 0; i < 5; i++) {
+                        xbeeTP.print("OFF\r\r\r");
+                        delay(50);
+                    }
+                }
+                break;
+
+            // LAND
+            case 5:
+                if (!hasSentLanded) {
+                    shouldTransmit = false;
+                    hasSentLanded = true;
+                }
+                digitalWrite(BUZZER_PIN, HIGH);
+                delay(500);
+                digitalWrite(BUZZER_PIN, LOW);
+                delay(500);
+                break;
+        }
     }
+    witnessValues[witnessRound++] = packet.altitude;
+    witnessSum += packet.altitude;
+
     EEPROM.update(stateAddr, packet.state);
-
-    File file = SD.open(cFileName, FILE_WRITE);
-    if (file) {
-        file.println(packet.combine());
-        file.println(InternalTemperature.readTemperatureC());
-        file.close();
-    }
 }
 
 uint32_t lastCommandAt = 0;
@@ -449,8 +606,13 @@ void doCommand(String cmd) {
         EEPROM.update(shouldTransmitAddr, shouldTransmit);
         EEPROM.update(pkgAddr, packet.packetCount);
         EEPROM.update(stateAddr, packet.state);
+        brakeSystem.halt();
         brakeSystem.forceBreak();
         isCamOff = true;
+        for (int i = 0; i < 5; i++) {
+            xbeeTP.print("ALT\r\r\r");
+            delay(50);
+        }
     } else if (cmd == "CX,OFF") {
         beep(1);
         shouldTransmit = false;
@@ -466,11 +628,11 @@ void doCommand(String cmd) {
     } else if (cmd.startsWith("SIMP,")) {
         simHandler.setPressure(cmd.substring(5).toInt());
     } else if (cmd.startsWith("ST,")) {
-        int hr = cmd.substring(3, 5).toInt();
-        int min = cmd.substring(6, 8).toInt();
-        int sec = cmd.substring(9, 11).toInt();
-        setTime(hr, min, sec, day(), month(), year());
-        xbeeTP.print("ST," + String(hr) + "," + String(min) + "," + String(sec) + "\r\r\r");
+        String hr = cmd.substring(3, 5);
+        String min = cmd.substring(6, 8);
+        String sec = cmd.substring(9, 11);
+        setTime(hr.toInt(), min.toInt(), sec.toInt(), day(), month(), year());
+        xbeeTP.print("ST," + hr + "," + min + "," + sec + "\r\r\r");
     }
     // Custom commands
     else if (cmd == "FORCE,PARADEPLOY")
@@ -485,11 +647,13 @@ void doCommand(String cmd) {
         brakeSystem.forceBreak();
     else if (cmd == "FORCE,POLL")
         xbeeTP.print("POLL\r\r\r");
-    else if (cmd == "FORCE,POLLON")
+    else if (cmd == "FORCE,POLLON") {
         shouldPollPayload = true;
-    else if (cmd == "FORCE,POLLOFF")
+        EEPROM.update(shouldPollPayloadAddr, shouldPollPayload);
+    } else if (cmd == "FORCE,POLLOFF") {
         shouldPollPayload = false;
-    else if (cmd == "FORCE,TPON")
+        EEPROM.update(shouldPollPayloadAddr, shouldPollPayload);
+    } else if (cmd == "FORCE,TPON")
         for (int i = 0; i < 5; i++) {
             xbeeTP.print("ON\r\r\r");
             delay(50);
@@ -503,17 +667,23 @@ void doCommand(String cmd) {
         toggleCamera();
     else if (cmd == "FORCE,SENDCUSTOM")
         shouldSendCustom = !shouldSendCustom;
-    else if (cmd.startsWith("FORCE,STATE"))
+    else if (cmd.startsWith("CALPRES,")) {
+        pressureOffset = cmd.substring(8).toInt();
+        EEPROM.update(pressureOffsetAddr, pressureOffset);
+    } else if (cmd.startsWith("FORCE,STATE"))
         packet.state = cmd.substring(11).toInt();
+    else if (cmd.startsWith("FORCE,MODE"))
+        brakeSystem.setMode(cmd.substring(10).toInt());
     else {
         xbeeGS.print("Unknown command: ");
         xbeeGS.print(cmd + '\r');
     }
 
-    File file = SD.open(cFileName, FILE_WRITE);
-    if (file) {
-        file.println("CMD: " + cmd);
-        file.close();
+    if (!cDebugFile) cDebugFile = SD.open(cDebugFileName, FILE_WRITE);
+    if (cDebugFile) {
+        cDebugFile.print(packet.time);
+        cDebugFile.println(" CMD: " + cmd);
+        cDebugFile.flush();
     }
 }
 
@@ -521,11 +691,21 @@ void loop() {
     // Read serial inputs
     while (Serial2.available())
         gps.encode(Serial2.read());
+
     if (xbeeTP.available()) {
-        DEBUG_PRINTLN("xbeeTP available");
+        // DEBUG_PRINTLN("xbeeTP available");
         String in = xbeeTP.readStringUntil('$');
         xbeeGS.print(in + '\r');
         Serial.println(in);
+        // if (!pFile) pFile = SD.open(pFileName, FILE_WRITE);
+        // if (pFile) {
+        //     pFile.print(in + '\r');
+        //     pFile.flush();
+        // }
+        // char c = xbeeTP.read();
+        // Serial.print(c);
+        // xbeeTP.print(c);
+        // if (c == '$') Serial.println();
     }
 
     if (Serial.available()) {
@@ -553,12 +733,10 @@ void loop() {
         lastPoll = millis();
         xbeeTP.print("POLL\r\r\r");
     }
-
     brakeSystem.run();
-    if (millis() - lastDoStateLogic >= 200) {
+    if (millis() - lastDoStateLogic >= 40) {
         lastDoStateLogic = millis();
         sprintf(packet.time, "%02d:%02d:%02d", hour(), minute(), second());
-        getGPSData();
         getBattery();
         stateLogic();
     }
@@ -575,4 +753,21 @@ void loop() {
             xbeeGS.print(packet.combineCustom());
         }
     }
+    if (shouldTransmit && millis() - lastSD >= 100) {
+        lastSD = millis();
+        Serial.println(packet.combine());
+        if (!cFile) cFile = SD.open(cFileName, FILE_WRITE);
+        if (cFile) {
+            cFile.print(packet.combine());
+            cFile.flush();
+        }
+    }
+
+#ifndef USE_360_FOR_PARA
+    if (millis() - lastKradik > 400 && isParachuteOn) {
+        lastKradik = millis();
+        servoParachute.write(kradikBool ? 70 : 97);
+        kradikBool = !kradikBool;
+    }
+#endif
 }
