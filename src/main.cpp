@@ -50,6 +50,7 @@
 #define shouldTransmitAddr 40
 #define shouldPollPayloadAddr 50
 #define pressureOffsetAddr 60
+#define tempOffsetAddr 70
 
 TinyGPSPlus gps;
 Adafruit_BME280 bme;
@@ -61,7 +62,7 @@ bool shouldTransmit, shouldPollPayload = false, shouldSendCustom = false;
 float groundAlt;
 float apogee = INT_MIN;
 bool isSimulation = false;
-float pressureOffset;
+float pressureOffset, tempOffset;
 
 unsigned long lastTransmit = 0, lastDoStateLogic = 0, lastPoll = 0, lastKradik = 0, lastSD = 0;
 bool isParachuteOn = false;
@@ -109,6 +110,10 @@ class PacketConstructor {
 
     String combineCustom() {
         return String(TEAM_ID) + "," + time + "," + packetCount + ",X," + String(InternalTemperature.readTemperatureC()) + "\r";
+    }
+
+    String getCustomHeader() const {
+        return String(TEAM_ID) + "," + time + "," + packetCount + ",X,";
     }
 }(packet);
 
@@ -334,29 +339,29 @@ void getGPSData() {
 
 // short bcount = 0;
 void getBMEData() {
-    packet.temp = bme.readTemperature();
-    float sensorAlt = bme.readAltitude(SEALEVELPRESSURE_HPA) + pressureOffset;
+    packet.temp = bme.readTemperature() + tempOffset;
+    float sensorAlt = bme.readAltitude(SEALEVELPRESSURE_HPA);
     // bcount++;
     // if (bcount > 100) {
     //     packet.altitude += 10000;
     //     if (bcount > 101) bcount = 0;
     // }
 
-    Serial.print(sensorAlt);
-    if (!cDebugFile) cDebugFile = SD.open(cDebugFileName, FILE_WRITE);
-    if (cDebugFile) {
-        cDebugFile.print(packet.time);
-        cDebugFile.print(" ");
-        cDebugFile.print(packet.altitude);
-    }
-    sensorAlt = altitudeFilter.updateEstimate(sensorAlt);
-    Serial.print(",");
-    Serial.println(sensorAlt);
-    if (cDebugFile) {
-        cDebugFile.print(", ");
-        cDebugFile.println(packet.altitude);
-        cDebugFile.flush();
-    }
+    // Serial.print(sensorAlt);
+    // if (!cDebugFile) cDebugFile = SD.open(cDebugFileName, FILE_WRITE);
+    // if (cDebugFile) {
+    //     cDebugFile.print(packet.time);
+    //     cDebugFile.print(" ");
+    //     cDebugFile.print(packet.altitude);
+    // }
+    sensorAlt = altitudeFilter.updateEstimate(sensorAlt) + pressureOffset;
+    // Serial.print(",");
+    // Serial.println(sensorAlt);
+    // if (cDebugFile) {
+    //     cDebugFile.print(", ");
+    //     cDebugFile.println(packet.altitude);
+    //     cDebugFile.flush();
+    // }
     packet.altitude = (isSimulation ? simHandler.calcAltitude() : sensorAlt) - groundAlt;
     // if (packet.altitude < -500 || packet.altitude > 800) return;
     if (packet.altitude >= apogee) {
@@ -377,10 +382,11 @@ void recovery() {
     packet.packetCount = EEPROM.read(pkgAddr);
     packet.state = EEPROM.read(stateAddr);
     isSimulation = EEPROM.read(modeAddr);
-    groundAlt = EEPROM.read(groundAltAddr);
+    EEPROM.get(groundAltAddr, groundAlt);
     shouldTransmit = EEPROM.read(shouldTransmitAddr);
     shouldPollPayload = EEPROM.read(shouldPollPayloadAddr);
-    pressureOffset = EEPROM.read(pressureOffsetAddr);
+    EEPROM.get(pressureOffsetAddr, pressureOffset);
+    EEPROM.get(tempOffsetAddr, tempOffset);
     // packet.lastCmd = EEPROM.read(lastCmdAddr); // later krub
 
     Serial.println("Simulation Mode? " + String(isSimulation ? "Yes" : "No"));
@@ -390,12 +396,13 @@ void recovery() {
     Serial.println("State: " + packet.getStateString());
     Serial.println("Ground Altitude: " + String(groundAlt));
     Serial.println("Pressure Offset: " + String(pressureOffset));
+    Serial.println("Temperature Offset: " + String(tempOffset));
     // Serial.println("Last Command: " + packet.lastCmd);
     Serial.println();
 
     sprintf(packet.time, "%02d:%02d:%02d", hour(), minute(), second());
-    xbeeGS.print(String(TEAM_ID) + "," + packet.time + "," + packet.packetCount + ",X," + isSimulation + "," + shouldTransmit + "," + shouldPollPayload + "," + packet.packetCount + "," + packet.getStateString() + "," + groundAlt + "," + pressureOffset + "\r");
-    Serial.print(String(TEAM_ID) + "," + packet.time + "," + packet.packetCount + ",X," + isSimulation + "," + shouldTransmit + "," + shouldPollPayload + "," + packet.packetCount + "," + packet.getStateString() + "," + groundAlt + "," + pressureOffset + "\n");
+    xbeeGS.print(packet.getCustomHeader() + isSimulation + "," + shouldTransmit + "," + shouldPollPayload + "," + packet.packetCount + "," + packet.getStateString() + "," + groundAlt + "," + pressureOffset + "," + tempOffset + "\r");
+    Serial.print(packet.getCustomHeader() + isSimulation + "," + shouldTransmit + "," + shouldPollPayload + "," + packet.packetCount + "," + packet.getStateString() + "," + groundAlt + "," + pressureOffset + "," + tempOffset + "\n");
 
     DEBUG_PRINTLN("declaring file index");
     int fileIndex = 0;
@@ -429,6 +436,11 @@ void recovery() {
 
     digitalWrite(CAMERA_PIN, HIGH);
     DEBUG_PRINTLN("beeping 3 times");
+
+    for (int i = 0; i < 100; i++) {
+        getBMEData();
+        delay(5);
+    }
     beep(3);
 }
 
@@ -514,19 +526,19 @@ void stateLogic() {
             // PRELAUNCH
             case 0:
                 // Entry of LAUNCH state
-                if (chosenAlt > 30) packet.state = 1;
+                if (chosenAlt > 20) packet.state = 1;
                 break;
 
             // LAUNCH
             case 1:
                 // Entry of APOGEE state
-                if (chosenAlt >= 100 || apogee - chosenAlt >= 10) packet.state = 2;  // testing: (apogee - chosenAlt >= 10 && chosenAlt >= 60)
+                if (chosenAlt >= 670 || apogee - chosenAlt >= 20) packet.state = 2;  // testing: (apogee - chosenAlt >= 10 && chosenAlt >= 60)
                 break;
 
             // APOGEE
             case 2:
                 // Entry of PARADEPLOY state
-                if (chosenAlt <= (apogee > 100 ? 0.6 * apogee : 70)) {  // testing: (chosenAlt <= apogee - 15)
+                if (chosenAlt <= 410) {  // testing: (chosenAlt <= apogee - 15)
                     packet.state = 3;
                     setParachute(true);
                 }
@@ -535,7 +547,7 @@ void stateLogic() {
             // PARADEPLOY
             case 3:
                 // Entry of TPDEPLOY state
-                if (chosenAlt <= (apogee > 100 ? 0.45 * apogee : 50)) {
+                if (chosenAlt <= 310) {
                     packet.state = 4;
                     shouldPollPayload = true;
                     lastPoll = lastTransmit + 125;
@@ -597,17 +609,20 @@ void doCommand(String cmd) {
     if (cmd == "CX,ON") {
         beep(2);
         shouldTransmit = true;
-        groundAlt = bme.readAltitude(SEALEVELPRESSURE_HPA);
-        packet.reset();
+        // groundAlt = bme.readAltitude(SEALEVELPRESSURE_HPA) + pressureOffset;
+        // altitudeFilter = SimpleKalmanFilter(1, 1, 0.01);
+        groundAlt = packet.altitude + groundAlt;
         setParachute(false);
         packet.payloadReleased = false;
         EEPROM.update(modeAddr, isSimulation);
-        EEPROM.update(groundAltAddr, groundAlt);
+        Serial.println(groundAlt);
+        EEPROM.put(groundAltAddr, groundAlt);
         EEPROM.update(shouldTransmitAddr, shouldTransmit);
         EEPROM.update(pkgAddr, packet.packetCount);
         EEPROM.update(stateAddr, packet.state);
         brakeSystem.halt();
         brakeSystem.forceBreak();
+        packet.reset();
         isCamOff = true;
         for (int i = 0; i < 5; i++) {
             xbeeTP.print("ALT\r\r\r");
@@ -668,15 +683,25 @@ void doCommand(String cmd) {
     else if (cmd == "FORCE,SENDCUSTOM")
         shouldSendCustom = !shouldSendCustom;
     else if (cmd.startsWith("CALPRES,")) {
-        pressureOffset = cmd.substring(8).toInt();
-        EEPROM.update(pressureOffsetAddr, pressureOffset);
+        pressureOffset = cmd.substring(8).toFloat();
+        EEPROM.put(pressureOffsetAddr, pressureOffset);
+        Serial.println(pressureOffset);
+        float offset;
+        EEPROM.get(pressureOffsetAddr, offset);
+        Serial.println(offset);
+    } else if (cmd.startsWith("CALTEMP,")) {
+        tempOffset = cmd.substring(8).toFloat();
+        EEPROM.put(tempOffsetAddr, tempOffset);
+        Serial.println(tempOffset);
+        float offset;
+        EEPROM.get(tempOffsetAddr, offset);
+        Serial.println(offset);
     } else if (cmd.startsWith("FORCE,STATE"))
         packet.state = cmd.substring(11).toInt();
     else if (cmd.startsWith("FORCE,MODE"))
         brakeSystem.setMode(cmd.substring(10).toInt());
     else {
-        xbeeGS.print("Unknown command: ");
-        xbeeGS.print(cmd + '\r');
+        xbeeGS.print(packet.getCustomHeader() + "UNK" + "," + cmd + "\r");
     }
 
     if (!cDebugFile) cDebugFile = SD.open(cDebugFileName, FILE_WRITE);
@@ -714,7 +739,8 @@ void loop() {
         while (Serial.available()) {
             const String cmd = Serial.readStringUntil('\n');
             if (cmd == "\n") return;
-            doCommand(cmd.substring(9));
+            if (cmd.length() >= 10)
+                doCommand(cmd.substring(9));
         }
     }
     if (xbeeGS.available()) {
@@ -723,7 +749,8 @@ void loop() {
         while (xbeeGS.available()) {
             const String cmd = xbeeGS.readStringUntil('\r');
             if (cmd == "\r") return;
-            doCommand(cmd.substring(9));
+            if (cmd.length() >= 10)
+                doCommand(cmd.substring(9));
         }
     }
 
@@ -752,14 +779,19 @@ void loop() {
             Serial.println(packet.combineCustom());
             xbeeGS.print(packet.combineCustom());
         }
-    }
-    if (shouldTransmit && millis() - lastSD >= 100) {
-        lastSD = millis();
-        Serial.println(packet.combine());
+        // Serial.println(packet.combine());
         if (!cFile) cFile = SD.open(cFileName, FILE_WRITE);
         if (cFile) {
             cFile.print(packet.combine());
             cFile.flush();
+        }
+    }
+    if (shouldTransmit && millis() - lastSD >= 100) {
+        lastSD = millis();
+        if (!cDebugFile) cDebugFile = SD.open(cDebugFileName, FILE_WRITE);
+        if (cDebugFile) {
+            cDebugFile.print(String(packet.time) + "," + String(packet.packetCount) + "," + String(packet.altitude, 2) + "," + String(bme.readAltitude(SEALEVELPRESSURE_HPA)) + "," + String(packet.temp));
+            cDebugFile.flush();
         }
     }
 
