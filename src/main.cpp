@@ -609,9 +609,9 @@ void doCommand(String cmd) {
     if (cmd == "CX,ON") {
         beep(2);
         shouldTransmit = true;
-        // groundAlt = bme.readAltitude(SEALEVELPRESSURE_HPA) + pressureOffset;
+        groundAlt = bme.readAltitude(SEALEVELPRESSURE_HPA) + pressureOffset;
         // altitudeFilter = SimpleKalmanFilter(1, 1, 0.01);
-        groundAlt = packet.altitude + groundAlt;
+        // groundAlt = packet.altitude + groundAlt;
         setParachute(false);
         packet.payloadReleased = false;
         EEPROM.update(modeAddr, isSimulation);
