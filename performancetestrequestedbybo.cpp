@@ -1,4 +1,3 @@
-#define VERSION_NUM "1.0"
 #include <Adafruit_BME280.h>
 #include <EEPROM.h>
 #include <InternalTemperature.h>
@@ -8,8 +7,6 @@
 #include <TimeLib.h>
 #include <TinyGPSPlus.h>
 #include <Wire.h>
-
-#include <vector>
 
 // *** CONFIG - START ***
 
@@ -59,15 +56,13 @@ TinyGPSPlus gps;
 Adafruit_BME280 bme;
 Servo servoParachute;
 Servo servoBreak;
-SimpleKalmanFilter altitudeFilter(1, 1, 0.3);
-time_t RTCTime;
+SimpleKalmanFilter altitudeFilter(1, 1, 0.01);
 
 bool shouldTransmit, shouldPollPayload = false, shouldSendCustom = false;
 float groundAlt;
 float apogee = INT_MIN;
 bool isSimulation = false;
 float pressureOffset, tempOffset;
-float rawAltitude;
 
 unsigned long lastTransmit = 0, lastDoStateLogic = 0, lastPoll = 0, lastKradik = 0, lastSD = 0;
 bool isParachuteOn = false;
@@ -343,33 +338,30 @@ void getGPSData() {
 }
 
 // short bcount = 0;
+float thedelay = 0;
 void getBMEData() {
+    unsigned long startTime = millis();
     packet.temp = bme.readTemperature() + tempOffset;
-    float sensorAlt = bme.readAltitude(SEALEVELPRESSURE_HPA);
-    rawAltitude = sensorAlt;
-    // Serial.print(rawAltitude);
-    // Serial.print(",");
-    // Serial.println(bme.readPressure());
-
+    float sensorAlt = bme.readAltitude(SEALEVELPRESSURE_HPA) + pressureOffset;
     // bcount++;
     // if (bcount > 100) {
     //     packet.altitude += 10000;
     //     if (bcount > 101) bcount = 0;
     // }
 
-    // Serial.print(sensorAlt);
+    Serial.print(sensorAlt);
     // if (!cDebugFile) cDebugFile = SD.open(cDebugFileName, FILE_WRITE);
     // if (cDebugFile) {
     //     cDebugFile.print(packet.time);
     //     cDebugFile.print(" ");
     //     cDebugFile.print(packet.altitude);
     // }
-    if (packet.state > 0 && packet.state < 5)
-        sensorAlt = sensorAlt + pressureOffset;
-    else
-        sensorAlt = altitudeFilter.updateEstimate(sensorAlt) + pressureOffset;
-    // Serial.print(",");
-    // Serial.println(sensorAlt);
+    // sensorAlt = altitudeFilter.updateEstimate(sensorAlt) + pressureOffset;
+    thedelay = millis() - startTime;
+    Serial.print(",");
+    Serial.print(sensorAlt);
+    Serial.print(",");
+    Serial.println(thedelay);
     // if (cDebugFile) {
     //     cDebugFile.print(", ");
     //     cDebugFile.println(packet.altitude);
@@ -385,26 +377,9 @@ void getBMEData() {
 void getBattery() {
     float apparentVoltage = analogRead(VOLTAGE_PIN) * 3.3 / 1023.0;
     packet.voltage = apparentVoltage * ((R1_OHM + R2_OHM) / R2_OHM);
-    // if (packet.voltage < 5.3 && !Serial) {
-    //     beep(5, 25);
-    // }
-}
-
-std::vector<String> split(String str, char separator) {
-    std::vector<String> internal;
-    String val = "";
-    for (char c : str) {
-        if (c == separator) {
-            internal.push_back(val);
-            val = "";
-        } else {
-            val += c;
-        }
+    if (packet.voltage < 5.3 && !Serial) {
+        beep(5, 25);
     }
-    if (val != "") {
-        internal.push_back(val);
-    }
-    return internal;
 }
 
 void recovery() {
@@ -419,10 +394,6 @@ void recovery() {
     EEPROM.get(tempOffsetAddr, tempOffset);
     // packet.lastCmd = EEPROM.read(lastCmdAddr); // later krub
 
-    groundAlt = isnan(groundAlt) ? 0 : groundAlt;
-    pressureOffset = isnan(pressureOffset) ? 0 : pressureOffset;
-    tempOffset = isnan(tempOffset) ? 0 : tempOffset;
-
     Serial.println("Simulation Mode? " + String(isSimulation ? "Yes" : "No"));
     Serial.println("Should Transmit? " + String(shouldTransmit ? "Yes" : "No"));
     Serial.println("Should Poll Payload? " + String(shouldPollPayload ? "Yes" : "No"));
@@ -435,8 +406,8 @@ void recovery() {
     Serial.println();
 
     sprintf(packet.time, "%02d:%02d:%02d", hour(), minute(), second());
-    xbeeGS.print(packet.getCustomHeader() + VERSION_NUM + isSimulation + "," + shouldTransmit + "," + shouldPollPayload + "," + packet.packetCount + "," + packet.getStateString() + "," + groundAlt + "," + pressureOffset + "," + tempOffset + "\r");
-    Serial.print(packet.getCustomHeader() + VERSION_NUM + isSimulation + "," + shouldTransmit + "," + shouldPollPayload + "," + packet.packetCount + "," + packet.getStateString() + "," + groundAlt + "," + pressureOffset + "," + tempOffset + "\n");
+    xbeeGS.print(packet.getCustomHeader() + isSimulation + "," + shouldTransmit + "," + shouldPollPayload + "," + packet.packetCount + "," + packet.getStateString() + "," + groundAlt + "," + pressureOffset + "," + tempOffset + "\r");
+    Serial.print(packet.getCustomHeader() + isSimulation + "," + shouldTransmit + "," + shouldPollPayload + "," + packet.packetCount + "," + packet.getStateString() + "," + groundAlt + "," + pressureOffset + "," + tempOffset + "\n");
 
     DEBUG_PRINTLN("declaring file index");
     int fileIndex = 0;
@@ -454,23 +425,18 @@ void recovery() {
     Serial.print(" and ");
     Serial.println(pFileName);
     DEBUG_PRINTLN("Opening file");
-    File dFile = SD.open(cDebugFileName, FILE_WRITE);
-    if (dFile) {
-        dFile.println("Recovery Successful!");
-        dFile.println("Simulation Mode? " + String(isSimulation ? "Yes" : "No"));
-        dFile.println("Should Transmit? " + String(shouldTransmit ? "Yes" : "No"));
-        dFile.println("Packet Count: " + packet.packetCount);
-        dFile.println("State: " + packet.getStateString());
-        dFile.println("Ground Altitude: " + String(groundAlt));
-
-        dFile.flush();
-    }
-    File file = SD.open(cFileName, FILE_WRITE);
+    File file = SD.open(cDebugFileName, FILE_WRITE);
     if (file) {
+        file.println("Recovery Successful!");
+        file.println("Simulation Mode? " + String(isSimulation ? "Yes" : "No"));
+        file.println("Should Transmit? " + String(shouldTransmit ? "Yes" : "No"));
+        file.println("Packet Count: " + packet.packetCount);
+        file.println("State: " + packet.getStateString());
+        file.println("Ground Altitude: " + String(groundAlt));
+
         file.println("TEAM_ID,MISSION_TIME,PACKET_COUNT,PACKET_TYPE,MODE,TP_RELEASED,ALTITUDE,TEMP,VOLTAGE,GPS_TIME,GPS_LATITUDE,GPS_LONGITUDE,GPS_ALTITUDE,GPS_SATS,SOFTWARE_STATE,CMD_ECHO");
         file.flush();
     }
-
     DEBUG_PRINTLN("wrote file and setting cam");
 
     digitalWrite(CAMERA_PIN, HIGH);
@@ -508,7 +474,7 @@ void setup() {
     digitalWrite(BUZZER_PIN, LOW);
     delay(500);
 
-    // DEBUG_PRINTLN("Setting teensy time provider");
+    DEBUG_PRINTLN("Setting teensy time provider");
     setSyncProvider(getTeensy3Time);
 
     // Initiate I2C devices
@@ -543,9 +509,7 @@ void stateLogic() {
     getBMEData();
     getGPSData();
 
-    witnessValues[witnessRound++] = packet.altitude;
-    witnessSum += packet.altitude;
-    if (witnessRound >= 5 || !(packet.state > 0 && packet.state < 5)) {
+    if (witnessRound > 4) {
         float average = witnessSum / 5;
         float leastDelta = INT_MAX, chosenAlt;
         for (int i = 0; i < 5; i++) {
@@ -556,9 +520,6 @@ void stateLogic() {
         }
         witnessRound = 0;
         witnessSum = 0;
-        if (!(packet.state > 0 && packet.state < 5))
-            chosenAlt = packet.altitude;
-        packet.altitude = chosenAlt;
         // if (!cDebugFile) cDebugFile = SD.open(cDebugFileName, FILE_WRITE);
         // if (cDebugFile) {
         //     cDebugFile.print(packet.time);
@@ -576,7 +537,7 @@ void stateLogic() {
             // LAUNCH
             case 1:
                 // Entry of APOGEE state
-                if (chosenAlt >= 670) packet.state = 2;  // testing: (apogee - chosenAlt >= 10 && chosenAlt >= 60)
+                if (chosenAlt >= 670 || apogee - chosenAlt >= 20) packet.state = 2;  // testing: (apogee - chosenAlt >= 10 && chosenAlt >= 60)
                 break;
 
             // APOGEE
@@ -618,9 +579,6 @@ void stateLogic() {
                 if (chosenAlt <= 5) {
                     packet.state = 5;
                     hasSentLanded = false;
-                    shouldPollPayload = false;
-                    brakeSystem.halt();
-                    brakeSystem.forceRelease();
                     for (int i = 0; i < 5; i++) {
                         xbeeTP.print("OFF\r\r\r");
                         delay(50);
@@ -641,13 +599,14 @@ void stateLogic() {
                 break;
         }
     }
+    witnessValues[witnessRound++] = packet.altitude;
+    witnessSum += packet.altitude;
 
     EEPROM.update(stateAddr, packet.state);
 }
 
 uint32_t lastCommandAt = 0;
 void doCommand(String cmd) {
-    bool doBeep = true;
     packet.lastCmd = cmd.substring(0, cmd.indexOf(",")) + cmd.substring(cmd.indexOf(",") + 1);
     // EEPROM.update(lastCmdAddr, packet.lastCmd); // later krub
     if (millis() - lastCommandAt < 1000) return;
@@ -693,7 +652,6 @@ void doCommand(String cmd) {
         String min = cmd.substring(6, 8);
         String sec = cmd.substring(9, 11);
         setTime(hr.toInt(), min.toInt(), sec.toInt(), day(), month(), year());
-        Teensy3Clock.set(now());
         xbeeTP.print("ST," + hr + "," + min + "," + sec + "\r\r\r");
     }
     // Custom commands
@@ -748,11 +706,8 @@ void doCommand(String cmd) {
     else if (cmd.startsWith("FORCE,MODE"))
         brakeSystem.setMode(cmd.substring(10).toInt());
     else {
-        // xbeeGS.print(packet.getCustomHeader() + "UNK" + "," + cmd + "\r");
-        doBeep = false;
+        xbeeGS.print(packet.getCustomHeader() + "UNK" + "," + cmd + "\r");
     }
-
-    if (doBeep) beep(1);
 
     if (!cDebugFile) cDebugFile = SD.open(cDebugFileName, FILE_WRITE);
     if (cDebugFile) {
@@ -770,12 +725,8 @@ void loop() {
     if (xbeeTP.available()) {
         // DEBUG_PRINTLN("xbeeTP available");
         String in = xbeeTP.readStringUntil('$');
-        // std::vector<String> splitted = split(in, ',');
-
-        sprintf(packet.time, "%02d:%02d:%02d", hour(), minute(), second());
-        xbeeGS.print(String(TEAM_ID) + "," + packet.time + "," + packet.packetCount + ",T," + in + '\r');
-        Serial.println(String(TEAM_ID) + "," + packet.time + "," + packet.packetCount + ",T," + in);
-        packet.packetCount++;
+        xbeeGS.print(in + '\r');
+        // Serial.println(in);
         // if (!pFile) pFile = SD.open(pFileName, FILE_WRITE);
         // if (pFile) {
         //     pFile.print(in + '\r');
@@ -789,8 +740,9 @@ void loop() {
 
     if (Serial.available()) {
         DEBUG_PRINTLN("Serial available");
+        beep(1);
         while (Serial.available()) {
-            const String cmd = Serial.readStringUntil('\r');
+            const String cmd = Serial.readStringUntil('\n');
             if (cmd == "\n") return;
             if (cmd.length() >= 10)
                 doCommand(cmd.substring(9));
@@ -798,6 +750,7 @@ void loop() {
     }
     if (xbeeGS.available()) {
         DEBUG_PRINTLN("xbeeGS available");
+        beep(1);
         while (xbeeGS.available()) {
             const String cmd = xbeeGS.readStringUntil('\r');
             if (cmd == "\r") return;
@@ -821,7 +774,7 @@ void loop() {
     }
     if (shouldTransmit && millis() - lastTransmit >= 1000) {
         lastTransmit = millis();
-        Serial.println(packet.combine());
+        // Serial.println(packet.combine());
         // Serial.println(InternalTemperature.readTemperatureC());
         xbeeGS.print(packet.combine());
         packet.packetCount++;
@@ -842,7 +795,7 @@ void loop() {
         lastSD = millis();
         if (!cDebugFile) cDebugFile = SD.open(cDebugFileName, FILE_WRITE);
         if (cDebugFile) {
-            cDebugFile.println(String(packet.time) + "," + String(packet.packetCount) + "," + String(packet.altitude, 2) + "," + String(rawAltitude) + "," + String(packet.temp));
+            cDebugFile.print(String(packet.time) + "," + String(packet.packetCount) + "," + String(packet.altitude, 2) + "," + String(bme.readAltitude(SEALEVELPRESSURE_HPA)) + "," + String(packet.temp));
             cDebugFile.flush();
         }
     }
